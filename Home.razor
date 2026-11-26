@@ -1,0 +1,208 @@
+﻿@* Author: Andrey Gritskiv *@
+@page "/"
+@using System.Text.Json
+@using ClientApp.Models
+@inject HttpClient Http
+
+<PageTitle>InventoryHub | Andrey Gritskiv</PageTitle>
+
+<div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4 border-bottom pb-3">
+        <div>
+            <h1 class="mb-0 fw-bold">InventoryHub Dashboard</h1>
+            <small class="text-muted">Full-Stack Inventory Management System &bull; Engineered by <strong>Andrey Gritskiv</strong></small>
+        </div>
+        <div class="text-end">
+            <button class="btn btn-primary btn-sm" @onclick="() => LoadProductsAsync(forceRefresh: true)" disabled="@isLoading">
+                @(isLoading ? "Syncing..." : "Refresh Data")
+            </button>
+            @if (!string.IsNullOrEmpty(cacheStatus))
+            {
+                <div class="mt-1">
+                    <span class="badge @(cacheStatus == "HIT" ? "bg-success" : "bg-info text-dark")">
+                        API Cache: @cacheStatus
+                    </span>
+                </div>
+            }
+        </div>
+    </div>
+
+    @if (isLoading)
+    {
+        <div class="text-center my-5">
+            <div class="spinner-border text-primary" role="status"></div>
+            <p class="mt-2 text-muted">Fetching inventory records from ServerApp...</p>
+        </div>
+    }
+    else if (!string.IsNullOrEmpty(errorMessage))
+    {
+        <div class="alert alert-danger shadow-sm" role="alert">
+            <h5 class="alert-heading">Integration Error</h5>
+            <p class="mb-0">@errorMessage</p>
+        </div>
+    }
+    else if (products != null)
+    {
+        <!-- Summary Metrics -->
+        <div class="row g-3 mb-4">
+            <div class="col-md-4">
+                <div class="card border-0 shadow-sm bg-light">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small">Total Products</h6>
+                        <h3 class="fw-bold mb-0">@products.Length</h3>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card border-0 shadow-sm bg-light">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small">Total Inventory Value</h6>
+                        <h3 class="fw-bold mb-0 text-success">$@products.Sum(p => p.Price * p.Stock).ToString("N2")</h3>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card border-0 shadow-sm bg-light">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small">Low / Out of Stock</h6>
+                        <h3 class="fw-bold mb-0 text-warning">@products.Count(p => p.Stock <= 10)</h3>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Client-Side Search & Filter -->
+        <div class="row g-2 mb-3">
+            <div class="col-md-8">
+                <input type="text"
+                       class="form-control"
+                       placeholder="Search by product name or SKU (e.g., AG-TECH-001)..."
+                       @bind="searchQuery"
+                       @bind:event="oninput" />
+            </div>
+            <div class="col-md-4">
+                <select class="form-select" @bind="selectedCategory">
+                    <option value="">All Categories</option>
+                    @foreach (var category in Categories)
+                    {
+                        <option value="@category">@category</option>
+                    }
+                </select>
+            </div>
+        </div>
+
+        <!-- Product Table -->
+        <div class="table-responsive shadow-sm rounded">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-dark">
+                    <tr>
+                        <th>SKU</th>
+                        <th>Product Name</th>
+                        <th>Category</th>
+                        <th class="text-end">Unit Price</th>
+                        <th class="text-center">Stock</th>
+                        <th class="text-center">Availability</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var product in FilteredProducts)
+                    {
+                        <tr>
+                            <td><code>@product.Sku</code></td>
+                            <td class="fw-semibold">@product.Name</td>
+                            <td><span class="badge bg-secondary">@product.Category.Name</span></td>
+                            <td class="text-end">$@product.Price.ToString("F2")</td>
+                            <td class="text-center">@product.Stock</td>
+                            <td class="text-center">
+                                <span class="badge @GetStatusBadgeClass(product.Stock)">
+                                    @product.StockStatus
+                                </span>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        <footer class="mt-4 pt-3 border-top text-center text-muted small">
+            &copy; @DateTime.Now.Year InventoryHub &bull; Built by <strong>Andrey Gritskiv</strong> using ASP.NET Core &amp; Blazor WebAssembly
+        </footer>
+    }
+</div>
+
+@code {
+    private Product[]? products;
+    private bool isLoading = true;
+    private string? errorMessage;
+    private string? cacheStatus;
+    private string searchQuery = string.Empty;
+    private string selectedCategory = string.Empty;
+
+    private IEnumerable<string> Categories =>
+        products?.Select(p => p.Category.Name).Distinct().OrderBy(c => c) ?? Enumerable.Empty<string>();
+
+    private IEnumerable<Product> FilteredProducts =>
+        products?.Where(p =>
+            (string.IsNullOrWhiteSpace(searchQuery) ||
+             p.Name.Contains(searchQuery, StringComparison.OrdinalIgnoreCase) ||
+             p.Sku.Contains(searchQuery, StringComparison.OrdinalIgnoreCase)) &&
+            (string.IsNullOrWhiteSpace(selectedCategory) || p.Category.Name == selectedCategory)
+        ) ?? Enumerable.Empty<Product>();
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (products != null)
+        {
+            isLoading = false;
+            return;
+        }
+
+        await LoadProductsAsync(forceRefresh: false);
+    }
+
+    private async Task LoadProductsAsync(bool forceRefresh)
+    {
+        isLoading = true;
+        errorMessage = null;
+
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var url = forceRefresh ? "/api/productlist?refresh=true" : "/api/productlist";
+            var response = await Http.GetAsync(url, cts.Token);
+            response.EnsureSuccessStatusCode();
+
+            if (response.Headers.TryGetValues("X-Cache-Status", out var values))
+            {
+                cacheStatus = values.FirstOrDefault();
+            }
+
+            var json = await response.Content.ReadAsStringAsync(cts.Token);
+            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            products = JsonSerializer.Deserialize<Product[]>(json, options);
+        }
+        catch (TaskCanceledException)
+        {
+            errorMessage = "Request timed out. The back-end API did not respond within 10 seconds.";
+        }
+        catch (HttpRequestException ex)
+        {
+            errorMessage = $"Connection failed: {ex.Message}. Make sure ServerApp is running on http://localhost:5000.";
+        }
+        catch (JsonException)
+        {
+            errorMessage = "Invalid JSON payload received from the server.";
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private string GetStatusBadgeClass(int stock) => stock switch
+    {
+        0 => "bg-danger",
+        <= 10 => "bg-warning text-dark",
+        _ => "bg-success"
+    };
+}
